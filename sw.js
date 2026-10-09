@@ -1,5 +1,5 @@
 /* Hierro: funciona sin conexión. Sube CACHE cuando cambien los archivos. */
-const CACHE = 'hierro-v1';
+const CACHE = 'hierro-v2';
 const FONTS = 'hierro-fonts';
 const ASSETS = ['./', './index.html', './app.css', './app.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 

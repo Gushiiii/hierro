@@ -2,7 +2,7 @@
 /* Hierro · registro de entrenamiento de gimnasio.
    Todo vive en el teléfono: IndexedDB como almacenamiento principal y localStorage como copia. */
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -104,7 +104,7 @@ function freshState() {
   return {
     v: 1, savedAt: 0, created: Date.now(),
     settings: { unit: 'kg', rest: 90, sound: true, wake: true, suggest: true, theme: 'auto', weekGoal: 3, barKg: 20, barLb: 45, lastBackup: 0, installHidden: false, welcomeHidden: false },
-    exercises: defaultExercises(), routines: seedRoutines(), sessions: [], active: null, body: [], log: [],
+    exercises: defaultExercises(), routines: seedRoutines(), sessions: [], active: null, body: [], log: [], exRest: {},
   };
 }
 function normalize(st) {
@@ -114,6 +114,7 @@ function normalize(st) {
   delete out.app; delete out.exported; delete out.version;
   out.settings = { ...base.settings, ...(st.settings || {}) };
   for (const k of ['exercises', 'routines', 'sessions', 'body', 'log']) if (!Array.isArray(out[k])) out[k] = base[k];
+  if (!out.exRest || typeof out.exRest !== 'object' || Array.isArray(out.exRest)) out.exRest = {};
   const ids = new Set(out.exercises.map(e => e.id));
   for (const e of base.exercises) if (!ids.has(e.id)) out.exercises.push(e);
   out.sessions.sort((a, b) => a.start - b.start);
@@ -307,6 +308,15 @@ function weekStreak() {
   let n = 0;
   while (weeks.has(w.getTime())) { n++; w = addDays(w, -7); }
   return n;
+}
+/* Descanso recordado por ejercicio: se usa en las próximas sesiones y rutinas. */
+const restFor = (ex, fallback) => S.exRest[ex] || fallback || S.settings.rest;
+function setExRest(it, sec) {
+  it.rest = sec;
+  S.exRest[it.ex] = sec;
+  for (const r of S.routines) for (const i of r.items) if (i.ex === it.ex) i.rest = sec;
+  logEv('ejercicio', `Descanso de ${exName(it.ex)}: ${fmtRest(sec)} (se recordará)`);
+  persist();
 }
 const routineMinutes = r => Math.max(5, Math.round(r.items.reduce((m, it) => m + it.sets * (40 + (it.rest || 90)), 0) / 60 / 5) * 5);
 
@@ -610,11 +620,16 @@ function vExCard(it, idx) {
       <div class="ex-title"><h3>${esc(ex.name)}</h3><div class="ex-tags">${mtag(it.ex)}${it.reps ? `<span class="target">Objetivo ${esc(it.reps)} reps</span>` : ''}</div></div>
       <button class="icon-btn" data-act="ex-menu" aria-label="Opciones de ${esc(ex.name)}">${ic('dots')}</button>
     </div>
+    <div class="ex-rest${S.exRest[it.ex] ? '' : ' ask'}">
+      ${ic('timer', 'ic-sm')}
+      <label for="rest-${it.id}">${S.exRest[it.ex] ? 'Descanso entre series' : '¿Cuánto descansas entre series?'}</label>
+      <select id="rest-${it.id}" class="field field-sm" data-f="ex-rest">${[...new Set([...REST_OPTS, it.rest])].sort((a, b) => a - b).map(o => `<option value="${o}"${o === it.rest ? ' selected' : ''}>${fmtRest(o)}</option>`).join('')}</select>
+    </div>
     ${it.note ? `<p class="ex-note">${ic('note', 'ic-sm')}${esc(it.note)}</p>` : ''}
     ${suggestion(it, prev)}
     <div class="set-row set-head" aria-hidden="true"><span>Serie</span><span>Anterior</span><span>${U()}</span><span>Reps</span><span>${ic('check', 'ic-sm')}</span></div>
     ${rows}
-    <div class="ex-foot"><button class="btn btn-sm btn-soft" data-act="set-add">${ic('plus')} Serie</button><button class="chip-btn" data-act="ex-rest">${ic('timer', 'ic-sm')} Descanso ${fmtRest(it.rest)}</button></div>
+    <div class="ex-foot"><button class="btn btn-sm btn-soft" data-act="set-add">${ic('plus')} Serie</button></div>
   </section>`;
 }
 function suggestion(it, prev) {
@@ -839,7 +854,7 @@ function startWorkout(rid) {
   S.active = {
     id: uid(), routineId: r ? r.id : null, name: r ? r.name : 'Entrenamiento libre', color: r ? r.color : '#e9a21f',
     start: Date.now(), note: '', rest: null,
-    items: r ? r.items.map(it => ({ id: uid(), ex: it.ex, rest: it.rest || S.settings.rest, reps: it.reps || '', note: '', sets: newSets(it.sets) })) : [],
+    items: r ? r.items.map(it => ({ id: uid(), ex: it.ex, rest: restFor(it.ex, it.rest), reps: it.reps || '', note: '', sets: newSets(it.sets) })) : [],
   };
   logEv('entreno', `Entrenamiento iniciado: ${S.active.name}`);
   persist(true);
@@ -854,7 +869,7 @@ function addExercisesToWorkout() {
       for (const ex of ids) {
         const last = lastDone(ex);
         const lastIt = last && last.items.find(i => i.ex === ex);
-        S.active.items.push({ id: uid(), ex, rest: lastIt ? lastIt.rest : S.settings.rest, reps: lastIt ? lastIt.reps || '' : '', note: '', sets: newSets(lastIt ? Math.max(1, lastIt.sets.filter(isWork).length) : 3) });
+        S.active.items.push({ id: uid(), ex, rest: restFor(ex, lastIt && lastIt.rest), reps: lastIt ? lastIt.reps || '' : '', note: '', sets: newSets(lastIt ? Math.max(1, lastIt.sets.filter(isWork).length) : 3) });
         logEv('entreno', `Ejercicio agregado al entrenamiento: ${exName(ex)}`);
       }
       persist(); render(true);
@@ -1243,7 +1258,7 @@ const ACT = {
     });
   },
   'ed-color': el => { ui.edit.color = el.dataset.c; render(true); },
-  'ed-add': () => openPicker({ onDone: ids => { for (const ex of ids) ui.edit.items.push({ id: uid(), ex, sets: 3, reps: '8-12', rest: S.settings.rest }); render(true); } }),
+  'ed-add': () => openPicker({ onDone: ids => { for (const ex of ids) ui.edit.items.push({ id: uid(), ex, sets: 3, reps: '8-12', rest: restFor(ex) }); render(true); } }),
   'ed-del': el => { ui.edit.items.splice(Number(el.closest('[data-i]').dataset.i), 1); render(true); },
   'ed-move': el => { const i = Number(el.closest('[data-i]').dataset.i), j = i + Number(el.dataset.d), a = ui.edit.items; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; render(true); },
   'ed-sets': el => { const it = ui.edit.items[Number(el.closest('[data-i]').dataset.i)]; it.sets = clamp(it.sets + Number(el.dataset.d), 1, 12); render(true); },
@@ -1255,6 +1270,7 @@ const ACT = {
     const data = { id: e.id, name: e.name.trim(), color: e.color, note: e.note || '', items: e.items, created: e.created || Date.now(), updated: Date.now() };
     const i = S.routines.findIndex(r => r.id === e.id);
     if (i >= 0) S.routines[i] = data; else S.routines.push(data);
+    for (const it of data.items) S.exRest[it.ex] = it.rest;
     logEv('rutina', `${e.isNew ? 'Rutina creada' : 'Rutina editada'}: ${data.name} (${data.items.length} ejercicios)`);
     persist(); ui.edit = null; ui.view = null; render(); window.scrollTo(0, 0);
     toast(e.isNew ? 'Rutina creada' : 'Rutina guardada', 'good');
@@ -1275,6 +1291,7 @@ const ACT = {
     if (!r || r < 1) { rIn.focus(); row.classList.add('shake'); setTimeout(() => row.classList.remove('shake'), 450); toast('Escribe las repeticiones de la serie'); return; }
     const best = bestWeight(it.ex);
     s.w = w; s.r = Math.round(r); s.done = true; s.t = Date.now();
+    if (!S.exRest[it.ex]) S.exRest[it.ex] = it.rest; // usar el descanso propuesto cuenta como respuesta
     logEv('serie', `${exName(it.ex)}: ${fmtWU(w)} × ${s.r}${s.type !== 'n' ? ` (${SET_TYPES[s.type].l.toLowerCase()})` : ''}`);
     haptic();
     if (isWork(s) && best > 0 && w > best) toast(`¡Nuevo récord en ${exName(it.ex)}: ${fmtWU(w)}!`, 'pr');
@@ -1373,7 +1390,7 @@ function openNote(it) {
 }
 function openRestPicker(it) {
   openSheet(`<h3 class="sheet-title">Descanso · ${esc(exName(it.ex))}</h3><div class="chips rest-chips">${REST_OPTS.map(o => `<button class="chip${o === it.rest ? ' on' : ''}" data-act="rest-pick" data-v="${o}">${fmtRest(o)}</button>`).join('')}</div>`, {
-    acts: { 'rest-pick': (el, e, l) => { it.rest = Number(el.dataset.v); persist(); closeLayer(l); render(true); toast(`Descanso: ${fmtRest(it.rest)}`); } },
+    acts: { 'rest-pick': (el, e, l) => { setExRest(it, Number(el.dataset.v)); closeLayer(l); render(true); toast(`Descanso de ${fmtRest(it.rest)} guardado para las próximas sesiones`, 'good'); } },
   });
 }
 
@@ -1387,6 +1404,7 @@ const INPUT = {
   'ed-reps': el => { ui.edit.items[Number(el.closest('[data-i]').dataset.i)].reps = el.value.trim(); },
   'ed-rest': el => { ui.edit.items[Number(el.closest('[data-i]').dataset.i)].rest = Number(el.value); },
   'pg-ex': el => { ui.progEx = el.value; render(true); },
+  'ex-rest': el => { const it = itemOf(el); if (!it) return; setExRest(it, Number(el.value)); render(true); toast(`Descanso de ${fmtRest(it.rest)} guardado para las próximas sesiones`, 'good'); },
   'set-rest': el => { S.settings.rest = Number(el.value); logEv('ajustes', `Descanso por defecto: ${fmtRest(S.settings.rest)}`); persist(); },
 };
 
